@@ -1,16 +1,16 @@
 #!/bin/bash
 #
 # Starts a remote sbatch jobs and sets up correct port forwarding.
-# Sample usage: bash start.sh jupyter
-#               bash start.sh jupyter /home/users/raphtown
-#               bash start.sh tensorboard /home/users/raphtown
+# Sample usage: bash start.sh sherlock/singularity-jupyter 
+#               bash start.sh sherlock/singularity-jupyter /home/users/raphtown
+#               bash start.sh sherlock/singularity-jupyter /home/users/raphtown
 
 if [ ! -f params.sh ]
 then
     echo "Need to configure params before first run, run setup.sh!"
     exit
 fi
-source params.sh
+. params.sh
 
 if [ "$#" -eq 0 ]
 then
@@ -18,109 +18,71 @@ then
     exit
 fi
 
-NAME="${1:-}"
-SBATCH="$NAME.sbatch"
-
-# Exponential backoff Configuration
-
-TIMEOUT=${TIMEOUT-1}
-ATTEMPT=0
-
-if [ ! -f "sbatches/$SBATCH" ]
+if [ ! -f helpers.sh ]
 then
-    echo "$SBATCH does not exist!"
+    echo "Cannot find helpers.sh script!"
     exit
 fi
+. helpers.sh
 
-# Since we just have one port, only allow the user one running at a time
-# This command will return empty (not defined) if nothing running
+NAME="${1:-}"
 
-echo "== Checking for previous notebook =="
-PREVIOUS=`ssh sherlock squeue --name=$NAME --user=$USERNAME -o "%R" -h`
-if [ -z "$PREVIOUS" -a "${PREVIOUS+xxx}" = "xxx" ]; 
-  then
-      echo "No existing ${NAME} jobs found, continuing..."
-  else
-      echo "Found existing job for ${NAME}, ${PREVIOUS}."
-      echo "Please end.sh before using start.sh, or use resume.sh to resume."
-      exit 1
-fi
+# The user could request either <resource>/<script>.sbatch or
+#                               <name>.sbatch
+SBATCH="$NAME.sbatch"
 
+# set FORWARD_SCRIPT and FOUND
+set_forward_script
+check_previous_submit
+
+echo
 echo "== Getting destination directory =="
-SHERLOCK_HOME=`ssh sherlock pwd`
-ssh sherlock mkdir -p $SHERLOCK_HOME/forward-util
+RESOURCE_HOME=`ssh ${RESOURCE} pwd`
+ssh ${RESOURCE} mkdir -p $RESOURCE_HOME/forward-util
 
+echo
 echo "== Uploading sbatch script =="
-scp sbatches/$SBATCH sherlock:$SHERLOCK_HOME/forward-util/
+scp $FORWARD_SCRIPT ${RESOURCE}:$RESOURCE_HOME/forward-util/
 
-# Give them one gpu :)
-if [ "${PARTITION}" == "gpu" ];
-  then
-      echo "== Requesting GPU =="
-      PARTITION="${PARTITION} --gres gpu:1"
-  fi
+# adjust PARTITION if necessary
+set_partition
+echo
 
 echo "== Submitting sbatch =="
 
-command="sherlock sbatch
+SBATCH_NAME=$(basename $SBATCH)
+command="sbatch
     --job-name=$NAME
     --partition=$PARTITION
-    --output=$SHERLOCK_HOME/forward-util/$NAME.out
-    --error=$SHERLOCK_HOME/forward-util/$NAME.err
+    --output=$RESOURCE_HOME/forward-util/$SBATCH_NAME.out
+    --error=$RESOURCE_HOME/forward-util/$SBATCH_NAME.err
     --mem=$MEM
     --time=$TIME
-    $SHERLOCK_HOME/forward-util/$SBATCH $PORT \"${@:2}\""
+    $RESOURCE_HOME/forward-util/$SBATCH_NAME $PORT \"${@:2}\""
 
 echo ${command}
-ssh ${command}
+ssh ${RESOURCE} ${command}
 
-echo "== Waiting for job to start, using exponential backoff =="
-MACHINE=""
+# Tell the user how to debug before trying
+instruction_get_logs
 
-ALLOCATED="no"
-while [[ $ALLOCATED == "no" ]]
-  do
-                                                                  # nodelist
-    MACHINE=`ssh sherlock squeue --name=$NAME --user=$USERNAME -o "%N" -h`
-    
-    if [[ "$MACHINE" != "" ]]
-      then
-        echo "Attempt ${ATTEMPT}: resources allocated to ${MACHINE}!.."  1>&2
-        ALLOCATED="yes"
-        break
-    fi
-
-    echo "Attempt ${ATTEMPT}: not ready yet... retrying in $TIMEOUT.."  1>&2
-    sleep $TIMEOUT
-    ATTEMPT=$(( ATTEMPT + 1 ))
-    TIMEOUT=$(( TIMEOUT * 2 ))
-
-  done
-
-echo $MACHINE
-MACHINE="`ssh sherlock squeue --name=$NAME --user=$USERNAME -o "%R" -h`"
-echo $MACHINE
-
-# If we didn't get a node...
-if [[ "$MACHINE" != "sh"* ]]
-  then
-    echo "Max attempts ${MAX_ATTEMPTS} reached!"  1>&2
-    exit 1
-fi
-
+# Wait for the node allocation, get identifier
+get_machine
 echo "notebook running on $MACHINE"
-echo "== Setting up port forwarding =="
-sleep 5
-echo "ssh -L $PORT:localhost:$PORT sherlock ssh -L $PORT:localhost:$PORT -N $MACHINE &"
-ssh -L $PORT:localhost:$PORT sherlock ssh -L $PORT:localhost:$PORT -N "$MACHINE" &
 
-sleep 5
+setup_port_forwarding
+
+sleep 10
 echo "== Connecting to notebook =="
 
 # Print logs for the user, in case needed
-echo "== View Logs Like This =="
-echo "ssh sherlock cat $SHERLOCK_HOME/forward-util/${NAME}.out"
-echo "ssh sherlock cat $SHERLOCK_HOME/forward-util/${NAME}.err"
-ssh sherlock cat $SHERLOCK_HOME/forward-util/${NAME}.out
-ssh sherlock cat $SHERLOCK_HOME/forward-util/${NAME}.err
-echo "Open your browser to http://localhost:$PORT"
+print_logs
+
+echo
+
+instruction_get_logs
+echo
+echo "== Instructions =="
+echo "1. Password, output, and error printed to this terminal? Look at logs (see instruction above)"
+echo "2. Browser: http://sh-02-21.int:$PORT/ -> http://localhost:$PORT/..."
+echo "3. To end session: bash end.sh ${NAME}"
