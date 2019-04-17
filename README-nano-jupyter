@@ -1,2 +1,3 @@
 PN111193:forward nolson$ bash start.sh sbatches/nano-jupyter /oak/stanford/groups/msalit/ndolson
 PN111193:forward nolson$ bash end.sh sbatches/nano-jupyter
+bash resume.sh sbatches/nano-jupyter
